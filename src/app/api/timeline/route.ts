@@ -1,5 +1,4 @@
 import { GenChunk, ModelSocket } from "modelsocket";
-import { z } from "zod";
 
 const SYSTEM_PROMPT = "You are a helpful assistant.\n\n";
 const LLAMA_8B = "meta/llama3.1-8b-instruct-free";
