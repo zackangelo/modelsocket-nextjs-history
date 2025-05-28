@@ -1,101 +1,311 @@
-import Image from "next/image";
+"use client";
+
+import {
+  ExclamationCircleIcon,
+  MagnifyingGlassIcon,
+} from "@heroicons/react/24/outline";
+import { createEventSource, EventSourceClient } from "eventsource-client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Skeleton from "react-loading-skeleton";
+import { SchemaStream } from "schema-stream";
+import { z } from "zod";
+
+import "react-loading-skeleton/dist/skeleton.css";
+import { StopIcon } from "@heroicons/react/20/solid";
+
+type SseState = null | "loading" | "streaming" | "done";
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="https://nextjs.org/icons/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+  const [sse, setSse] = useState<EventSourceClient | null>(null);
+  const [timelineEvents, setTimelineEvents] = useState([]);
+  const [rejection, setRejection] = useState(undefined);
+  const [reqEvent, setReqEvent] = useState<string | null>(null);
+  const [sseState, setSseState] = useState<SseState>(null);
+  const scrollContainer = useRef<HTMLDivElement>(null);
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="https://nextjs.org/icons/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+  const schema = z.object({
+    rejection: z.optional(z.string()),
+    events: z.array(
+      z.object({
+        timeRange: z.string(),
+        description: z.string(),
+      })
+    ),
+  });
+
+  const cancel = useCallback(() => {
+    if (sse) {
+      sse.close();
+    }
+
+    if (sseState === "loading") {
+      setSseState(null);
+    } else if (sseState === "streaming") {
+      setSseState("done");
+    }
+  }, [sse]);
+
+  const submit = useCallback(async () => {
+    const parser = new SchemaStream(schema, { defaultData: { events: [] } });
+    const stream = parser.parse();
+    const reader = stream.readable.getReader();
+    const writer = stream.writable.getWriter();
+
+    if (reqEvent === null || reqEvent === "") {
+      return;
+    }
+
+    setSseState("loading");
+
+    let es = createEventSource({
+      url: "/api/timeline",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+
+      onMessage: ({ data }) => {
+        const dataJson = JSON.parse(data);
+
+        if (dataJson.text && dataJson.text != "") {
+          writer.write(dataJson.text);
+
+          const el = scrollContainer.current;
+          if (el) {
+            el.scrollTo(0, el.scrollHeight);
+          }
+        }
+
+        if (dataJson.done) {
+          es.close();
+          writer.close();
+        }
+
+        if (dataJson.error) {
+          writer.abort(dataJson.error);
+          es.close();
+        }
+      },
+      body: JSON.stringify({
+        stream: true,
+        params: {
+          event: reqEvent,
+        },
+      }),
+    });
+
+    setSse(es);
+
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { value, done } = await reader.read();
+
+      if (done) {
+        setSseState("done");
+        break;
+      }
+
+      const chunkValue = decoder.decode(value);
+      const outputJson = JSON.parse(chunkValue);
+
+      const timelineEvents = outputJson.events;
+      const rejection = outputJson.rejection;
+
+      if (timelineEvents.length > 0 || rejection) {
+        setSseState("streaming");
+      }
+
+      setTimelineEvents(timelineEvents);
+      setRejection(rejection);
+    }
+  }, [reqEvent]);
+
+  return (
+    <div className="w-full h-screen flex items-center justify-center border">
+      <div className="rounded-lg bg-white shadow max-w-2xl w-full transition-[height] ease-in duration-500">
+        <div className="px-4 py-5 sm:px-6">
+          <div className="flex w-full">
+            <div className="flex-1">
+              <label htmlFor="historicalEvent" className="sr-only">
+                Historical Event
+              </label>
+              <input
+                id="historicalEvent"
+                name="historicalEvent"
+                type="historicalEvent"
+                placeholder="The Sinking of the Titanic"
+                onChange={(e) => setReqEvent(e.target.value)}
+                className="block w-full rounded-md border-0 px-2.5 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-inset focus:ring-slate-50 sm:text-sm sm:leading-6"
+              />
+            </div>
+            <div className="pl-1">
+              <SearchOrCancelButton
+                state={sseState}
+                onSubmit={submit}
+                onCancel={cancel}
+              />
+            </div>
+          </div>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+
+        {sseState !== null && (
+          <div className="px-4 py-5 sm:p-6 flex justify-center">
+            <div
+              ref={scrollContainer}
+              className="w-5/6 max-h-96 overflow-scroll"
+            >
+              {sseState === "loading" && <LoadingSkeleton />}
+
+              {(sseState === "streaming" || sseState === "done") && (
+                <div className="text-sm text-gray-800">
+                  <Timeline rejection={rejection} events={timelineEvents} />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
+  );
+}
+
+function LoadingSkeleton(props: { className?: string }) {
+  return (
+    <div className={`${props.className}`}>
+      {[...Array(4)].map((e, i) => (
+        <div className="flex mb-6" key={i}>
+          <div className="w-3 h-3">
+            <Skeleton
+              circle
+              height="100%"
+              containerClassName="avatar-skeleton"
+            />
+          </div>
+          <div className="flex-1 pl-4">
+            <h3>
+              <Skeleton />
+            </h3>
+            <p>
+              <Skeleton count={2} />
+            </p>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Timeline(props: { rejection?: string; events: any[] }) {
+  const { events } = props;
+  return (
+    <ul role="list" className="space-y-6">
+      {props.rejection && <RejectionError rejection={props.rejection} />}
+
+      {events.map((event, idx) => (
+        <TimelineEvent
+          key={idx}
+          event={event}
+          isLast={idx == events.length - 1}
+        />
+      ))}
+    </ul>
+  );
+}
+
+function RejectionError(props: { rejection: string }) {
+  const { rejection } = props;
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    // Trigger the fade-in effect on mount
+    setIsVisible(true);
+  }, []);
+
+  return (
+    <li
+      className={`relative flex gap-x-4 transition-opacity ease-in duration-700 ${
+        isVisible ? "opacity-100" : "opacity-0"
+      }`}
+    >
+      <div className={`h-6 absolute left-0 top-0 flex w-6 justify-center`}>
+        <div className="w-px bg-gray-200" />
+      </div>
+
+      <div className="relative flex h-6 w-6 flex-none items-center justify-center bg-white">
+        <ExclamationCircleIcon
+          aria-hidden="true"
+          className="h-6 w-6 text-yellow-500"
+        />
+      </div>
+
+      <div>
+        <p className="text-gray-600 text-sm">{rejection}</p>
+      </div>
+    </li>
+  );
+}
+
+function TimelineEvent(props: { event: any; isLast: boolean }) {
+  const { event, isLast } = props;
+
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    // Trigger the fade-in effect on mount
+    setIsVisible(true);
+  }, []);
+
+  return (
+    <li
+      className={`relative flex gap-x-4 transition-opacity ease-in duration-700 ${
+        isVisible ? "opacity-100" : "opacity-0"
+      }`}
+    >
+      <div
+        className={`${isLast ? "h-6" : "-bottom-6"} 
+        absolute left-0 top-0 flex w-6 justify-center`}
+      >
+        <div className="w-px bg-gray-200" />
+      </div>
+
+      <div className="relative flex h-6 w-6 flex-none items-center justify-center bg-white">
+        <div className="h-1.5 w-1.5 rounded-full bg-gray-100 ring-1 ring-gray-300" />
+      </div>
+
+      <div>
+        <h3 className="text-gray-900 text-md">{event.timeRange}</h3>
+        <p className="text-gray-600 text-sm">{event.description}</p>
+      </div>
+    </li>
+  );
+}
+
+function SearchOrCancelButton(props: {
+  state: SseState;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  const { state, onSubmit, onCancel } = props;
+  const buttonCls =
+    "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50";
+
+  const isSubmitBtn = state === null || state === "done";
+  const isCancelBtn = state === "loading" || state === "streaming";
+
+  return (
+    <>
+      {isSubmitBtn && (
+        <button type="button" onClick={onSubmit} className={buttonCls}>
+          <MagnifyingGlassIcon className="stroke-slate-500 w-5 h-5" />
+        </button>
+      )}
+
+      {isCancelBtn && (
+        <button type="button" onClick={onCancel} className={buttonCls}>
+          <StopIcon className="stroke-slate-500 w-5 h-5" />
+        </button>
+      )}
+    </>
   );
 }
